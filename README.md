@@ -4,7 +4,7 @@ Planck service for managing graceful rollover during worker deployment.
 
 ## Usage
 
-    $ go run cmd/worker-graceful-rollover.go -capacity 1
+    $ go run cmd/worker-graceful-rollover/main.go -capacity 1
 
     (in separate tab 1)
 
