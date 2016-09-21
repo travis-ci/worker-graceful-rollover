@@ -35,6 +35,6 @@ func main() {
 			log.Fatalf("error: could not accept connection: %v", err)
 			panic(err)
 		}
-		go rollover.HandleConnection(sem, conn, &sink)
+		go rollover.HandleConnection(sem, conn, conn, &sink)
 	}
 }

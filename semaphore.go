@@ -8,7 +8,7 @@ import (
 
 type Semaphore chan interface{}
 
-func HandleConnection(sem Semaphore, conn io.ReadCloser, sink *chan error) {
+func HandleConnection(sem Semaphore, conn io.ReadCloser, notify io.Writer, sink *chan error) {
 	fmt.Println("accepted connection")
 
 	defer conn.Close()
@@ -30,6 +30,7 @@ func HandleConnection(sem Semaphore, conn io.ReadCloser, sink *chan error) {
 	case sem <- struct{}{}:
 		// acquire semaphore
 		fmt.Println("acquired")
+		notify.Write([]byte(".\n"))
 		defer func() {
 			// release semaphore
 			<-sem

@@ -10,7 +10,7 @@ In order to automate the restarting process we want to allocate a fixed capacity
 
 ## How
 
-When the `worker-graceful-rollover` process is started, its capacity is defined. It will then allow anyone to request a "slot" by opening a TCP connection. As long as the TCP connection is active, the slot is allocated to that client. Once a client closes the TCP connection, the slot is freed.
+When the `worker-graceful-rollover` process is started, its capacity is defined. It will then allow anyone to request a "slot" by opening a TCP connection. Once the slot is allocated, the server responds with a the byte sequence `.\n` ("\x2e\x0a"). As long as the TCP connection is active, the slot is allocated to that client. Once a client closes the TCP connection, the slot is freed.
 
 Essentially this program is an implementation of a semaphore. A counter for concurrent access that may never go under a certain threshold, meaning it will never be < 0.
 
