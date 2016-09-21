@@ -34,6 +34,11 @@ Essentially this program is an implementation of a semaphore. A counter for conc
 
     ^D
 
+## Plans
+
+* Integrate with worker
+* Eventually replace with consul or similar
+
 ## License
 
 MIT.
