@@ -8,8 +8,10 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/pkg/errors"
@@ -29,7 +31,7 @@ type request struct {
 	Err chan error
 }
 
-func server(control chan string, queue chan request, heartbeats, release chan string) {
+func server(control chan string, queue chan request, heartbeats, release chan string, done chan struct{}) {
 	st := new(state)
 	st.Locks = make(map[string]time.Time)
 
@@ -112,6 +114,14 @@ func server(control chan string, queue chan request, heartbeats, release chan st
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "error persisting state: %v\n", err)
 				}
+
+			case cmd == "shutdown":
+				log.Print("server: shutdown")
+				err := writeStateFile("state.json", st)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "error persisting state: %v\n", err)
+				}
+				close(done)
 			}
 
 		case id := <-heartbeats:
@@ -268,10 +278,11 @@ func main() {
 	queue := make(chan request)
 	heartbeats := make(chan string)
 	release := make(chan string)
+	done := make(chan struct{})
 
 	log.Print("starting server")
 
-	go server(control, queue, heartbeats, release)
+	go server(control, queue, heartbeats, release, done)
 
 	if *capacity > 0 {
 		log.Print("setting capacity")
@@ -290,6 +301,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("error: could not bind to %v: %v", *addr, err)
 	}
+
+	go func() {
+		signals := make(chan os.Signal)
+		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-signals
+
+		log.Printf("signal %s received, shutting down gracefully", sig)
+
+		log.Print("shutting down server (write state file)")
+		control <- "shutdown"
+		<-done
+
+		log.Print("shutting down tcp server")
+		ln.Close()
+
+		log.Print("exiting cleanly")
+		os.Exit(0)
+	}()
 
 	for {
 		conn, err := ln.Accept()
