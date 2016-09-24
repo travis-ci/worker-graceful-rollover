@@ -23,7 +23,13 @@ type state struct {
 	Locks    map[string]time.Time
 }
 
-func server(control, queue, heartbeats chan string) {
+type request struct {
+	ID  string
+	Ch  chan struct{}
+	Err chan error
+}
+
+func server(control chan string, queue chan request, heartbeats, release chan string) {
 	st := new(state)
 	st.Locks = make(map[string]time.Time)
 
@@ -32,8 +38,6 @@ func server(control, queue, heartbeats chan string) {
 		fmt.Fprintf(os.Stderr, "error reading state: %v\n", err)
 	}
 
-	expiryTimer := time.NewTimer(time.Second * 2)
-	persistTimer := time.NewTimer(time.Second * 10)
 	pollTimer := time.NewTimer(time.Second * 1)
 
 	for {
@@ -43,9 +47,10 @@ func server(control, queue, heartbeats chan string) {
 		if available > 0 {
 			log.Print("server: slots are available, polling queue")
 			select {
-			case id := <-queue:
-				log.Printf("server: acquire %v", id)
-				st.Locks[id] = time.Now().UTC()
+			case req := <-queue:
+				log.Printf("server: acquire %v", req.ID)
+				st.Locks[req.ID] = time.Now().UTC()
+				req.Ch <- struct{}{}
 			default:
 				log.Printf("server: queue empty")
 			}
@@ -84,6 +89,29 @@ func server(control, queue, heartbeats chan string) {
 				fmt.Printf("capacity: %v\n", st.Capacity)
 				fmt.Printf("slots in use: %v\n", len(st.Locks))
 				fmt.Printf("available slots: %v\n", available)
+
+			case cmd == "expire":
+				log.Print("server: expire")
+				var expiredIDs []string
+				expiry := time.Now().Add(-1 * time.Minute)
+
+				for id, timestamp := range st.Locks {
+					if timestamp.Before(expiry) {
+						expiredIDs = append(expiredIDs, id)
+					}
+				}
+
+				for _, id := range expiredIDs {
+					log.Printf("server: expired id %v", id)
+					delete(st.Locks, id)
+				}
+
+			case cmd == "persist":
+				log.Print("server: persist")
+				err := writeStateFile("state.json", st)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "error persisting state: %v\n", err)
+				}
 			}
 
 		case id := <-heartbeats:
@@ -92,28 +120,9 @@ func server(control, queue, heartbeats chan string) {
 				st.Locks[id] = time.Now().UTC()
 			}
 
-		case <-expiryTimer.C:
-			log.Print("server: expiry")
-			var expiredIDs []string
-			expiry := time.Now().Add(-1 * time.Minute)
-
-			for id, timestamp := range st.Locks {
-				if timestamp.Before(expiry) {
-					expiredIDs = append(expiredIDs, id)
-				}
-			}
-
-			for _, id := range expiredIDs {
-				log.Printf("server: expired id %v", id)
-				delete(st.Locks, id)
-			}
-
-		case <-persistTimer.C:
-			log.Print("server: persist")
-			err := writeStateFile("state.json", st)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error persisting state: %v\n", err)
-			}
+		case id := <-release:
+			log.Printf("server: release %v", id)
+			delete(st.Locks, id)
 
 		case <-pollTimer.C:
 			log.Print("server: poll")
@@ -174,7 +183,7 @@ func writeStateFile(filename string, st *state) error {
 	return nil
 }
 
-func handleConnection(conn net.Conn, queue, heartbeats chan string) error {
+func handleConnection(conn net.Conn, queue chan request, heartbeats chan string, release chan string) error {
 	defer conn.Close()
 
 	log.Print("conn: accept")
@@ -187,34 +196,82 @@ func handleConnection(conn net.Conn, queue, heartbeats chan string) error {
 
 	log.Printf("conn[%s]: received id", id)
 
-	queue <- id
+	req := &request{
+		ID:  id,
+		Ch:  make(chan struct{}),
+		Err: make(chan error),
+	}
 
-	scanner := bufio.NewScanner(conn)
-	for scanner.Scan() {
-		line := scanner.Text()
-		line = strings.TrimSpace(line)
-		switch line {
-		case "ping":
-			heartbeats <- id
+	done := make(chan struct{})
+	errs := make(chan error)
+
+	go func() {
+		scanner := bufio.NewScanner(conn)
+		for scanner.Scan() {
+			line := scanner.Text()
+			line = strings.TrimSpace(line)
+			switch line {
+			case "ping":
+				heartbeats <- id
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			errs <- err
+		}
+		release <- id
+		close(done)
+	}()
+
+	log.Printf("conn[%s]: sending request", id)
+
+	select {
+	case queue <- *req:
+		log.Printf("conn[%s]: sent", id)
+	case err := <-errs:
+		return err
+	case <-done:
+		log.Printf("conn[%s]: eof", id)
+		return nil
+	}
+
+	log.Printf("conn[%s]: awaiting response", id)
+
+	for {
+		select {
+		case <-req.Ch:
+			log.Printf("conn[%s]: lock acquired", id)
+			_, err := conn.Write([]byte("ok\n"))
+			if err != nil {
+				return err
+			}
+		case err := <-req.Err:
+			return err
+		case err := <-errs:
+			return err
+		case <-done:
+			log.Printf("conn[%s]: eof", id)
+			return nil
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
+}
 
-	return nil
+func periodicControlMessage(control chan string, d time.Duration, cmd string) {
+	for range time.NewTicker(d).C {
+		control <- cmd
+	}
 }
 
 func main() {
 	flag.Parse()
 
 	control := make(chan string)
-	queue := make(chan string)
+	queue := make(chan request)
 	heartbeats := make(chan string)
+	release := make(chan string)
 
 	log.Print("starting server")
 
-	go server(control, queue, heartbeats)
+	go server(control, queue, heartbeats, release)
 
 	if *capacity > 0 {
 		log.Print("setting capacity")
@@ -223,15 +280,9 @@ func main() {
 
 	log.Print("setting up status ticker")
 
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		for {
-			select {
-			case <-ticker.C:
-				control <- "status"
-			}
-		}
-	}()
+	go periodicControlMessage(control, 5*time.Second, "status")
+	go periodicControlMessage(control, 10*time.Second, "persist")
+	go periodicControlMessage(control, 2*time.Second, "expire")
 
 	log.Printf("listening on port %s", *addr)
 
@@ -247,9 +298,8 @@ func main() {
 			continue
 		}
 		go func() {
-			err := handleConnection(conn, queue, heartbeats)
+			err := handleConnection(conn, queue, heartbeats, release)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "error handling connection: %v\n", err)
 				fmt.Fprintf(os.Stderr, "error handling connection: %v\n", err)
 			}
 		}()
