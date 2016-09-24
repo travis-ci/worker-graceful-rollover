@@ -20,11 +20,11 @@ Essentially this program is an implementation of a semaphore. A counter for conc
 
     (in separate tab 1)
 
-    $ nc 127.0.0.1 8080
+    $ (echo a; while true; do echo ping; sleep 1; done) | nc 127.0.0.1 8080
 
     (in separate tab 2)
 
-    $ nc 127.0.0.1 8080
+    $ (echo b; while true; do echo ping; sleep 1; done) | nc 127.0.0.1 8080
 
     (in tab 1)
 
